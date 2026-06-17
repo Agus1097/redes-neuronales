@@ -12,7 +12,9 @@ Aplicación web desarrollada con **Streamlit** y **YOLOv8/Ultralytics** para det
 - Visualización de bounding boxes sobre la imagen.
 - Tabla con clase detectada, confianza y coordenadas de cada caja.
 - Extracción de ubicación GPS desde metadatos EXIF cuando la imagen los conserva.
-- Selección manual del departamento si la imagen no tiene GPS.
+- Geocodificación inversa: conversión de coordenadas GPS a dirección visible.
+- Uso de OpenStreetMap/Nominatim sin API key y soporte opcional para Google Maps Geocoding API.
+- Selección manual del departamento si la imagen no tiene GPS o si la detección automática no coincide.
 - Derivación sugerida:
   - `Manhole` → Aguas Mendocinas.
   - `Pothole` o `Crack` → Municipalidad del departamento.
@@ -46,6 +48,28 @@ dev/modelo.pt
 ```
 
 No hay que descomprimir ni renombrar nada dentro de esta versión del ZIP.
+
+## Ubicación y EXIF
+
+La app lee las coordenadas GPS desde los metadatos EXIF de la imagen original. Para que funcione, la foto debe conservar esos metadatos. Muchas redes sociales y apps de mensajería pueden eliminarlos al comprimir o reenviar imágenes.
+
+El flujo aplicado es:
+
+```text
+Imagen original → EXIF GPS → latitud/longitud → geocodificación inversa → dirección/departamento
+```
+
+Por defecto, la app usa **OpenStreetMap/Nominatim** mediante `requests`, por lo que no requiere instalar librerías adicionales ni configurar una API key. Sí requiere conexión a internet en el entorno donde corre Streamlit.
+
+Opcionalmente, se puede configurar Google Maps Geocoding API en Streamlit Secrets:
+
+```toml
+GOOGLE_MAPS_API_KEY = "TU_API_KEY_DE_GOOGLE_MAPS"
+```
+
+Si se configura esa clave, la app intenta usar Google Maps primero. Si Google falla o no hay clave, usa OpenStreetMap/Nominatim como fallback.
+
+Importante: la app conserva una copia de la imagen original para leer EXIF antes de convertirla a RGB, porque esa conversión puede eliminar los metadatos.
 
 ## Clases configuradas
 
@@ -123,6 +147,12 @@ Si `dev/modelo.pt` supera el límite de GitHub o Streamlit Cloud:
 
 ```toml
 MODEL_URL = "https://drive.google.com/uc?export=download&id=TU_FILE_ID"
+```
+
+Para mejorar la dirección obtenida desde GPS, también podés agregar opcionalmente:
+
+```toml
+GOOGLE_MAPS_API_KEY = "TU_API_KEY_DE_GOOGLE_MAPS"
 ```
 
 Hay un ejemplo en:

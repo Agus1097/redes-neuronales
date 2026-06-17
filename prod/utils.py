@@ -208,12 +208,18 @@ def get_primary_detection(detections_df: pd.DataFrame) -> Optional[dict]:
 # EXIF / GPS
 # ─────────────────────────────────────────────────────────────
 
+GPSINFO_TAG_ID = 34853
+
+
 def _to_float(value) -> float:
-    """Convierte IFDRational o fracciones EXIF a float."""
+    """Convierte IFDRational, fracciones EXIF o tuplas (num, den) a float."""
     try:
         return float(value)
-    except TypeError:
-        return float(value[0]) / float(value[1])
+    except (TypeError, ValueError):
+        if isinstance(value, tuple | list) and len(value) == 2:
+            numerator, denominator = value
+            return float(numerator) / float(denominator)
+        raise
 
 
 def _dms_to_decimal(dms_value) -> float:
@@ -224,8 +230,51 @@ def _dms_to_decimal(dms_value) -> float:
     return degrees + minutes + seconds
 
 
+def _decode_gps_ref(value, default: str) -> str:
+    """Normaliza GPSLatitudeRef/GPSLongitudeRef, que puede venir como str o bytes."""
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        return value.decode(errors="ignore").upper()
+    return str(value).upper()
+
+
+def _extract_raw_gps_ifd(exif_data) -> Optional[dict]:
+    """
+    Obtiene el bloque GPSInfo de forma compatible con distintas versiones de Pillow.
+
+    En algunas versiones `exif.get(GPSInfo)` devuelve directamente el diccionario.
+    En otras, conviene usar `get_ifd(34853)`.
+    """
+    gps_info = None
+
+    try:
+        gps_info = exif_data.get_ifd(GPSINFO_TAG_ID)
+    except Exception:
+        gps_info = None
+
+    if not gps_info:
+        try:
+            gps_info = exif_data.get(GPSINFO_TAG_ID)
+        except Exception:
+            gps_info = None
+
+    if not gps_info:
+        return None
+
+    if not hasattr(gps_info, "items"):
+        return None
+
+    return dict(gps_info.items())
+
+
 def extract_gps_from_exif(image: Image.Image) -> Optional[tuple[float, float]]:
-    """Extrae latitud y longitud desde los metadatos EXIF, si existen."""
+    """
+    Extrae latitud y longitud desde los metadatos EXIF, si existen.
+
+    Importante: llamá esta función sobre la imagen original recién abierta.
+    Si antes se hace `image.convert("RGB")`, Pillow puede descartar los EXIF.
+    """
     try:
         exif_data = image.getexif()
     except Exception:
@@ -234,36 +283,35 @@ def extract_gps_from_exif(image: Image.Image) -> Optional[tuple[float, float]]:
     if not exif_data:
         return None
 
-    gps_info = None
-    for tag_id, value in exif_data.items():
-        tag_name = TAGS.get(tag_id, tag_id)
-        if tag_name == "GPSInfo":
-            gps_info = value
-            break
-
-    if not gps_info:
+    raw_gps = _extract_raw_gps_ifd(exif_data)
+    if not raw_gps:
         return None
 
     gps_data = {}
-    try:
-        items = gps_info.items()
-    except AttributeError:
-        return None
-
-    for key, value in items:
+    for key, value in raw_gps.items():
         decoded_key = GPSTAGS.get(key, key)
         gps_data[decoded_key] = value
 
     if "GPSLatitude" not in gps_data or "GPSLongitude" not in gps_data:
         return None
 
-    lat = _dms_to_decimal(gps_data["GPSLatitude"])
-    lon = _dms_to_decimal(gps_data["GPSLongitude"])
+    try:
+        lat = _dms_to_decimal(gps_data["GPSLatitude"])
+        lon = _dms_to_decimal(gps_data["GPSLongitude"])
+    except Exception:
+        return None
 
-    if gps_data.get("GPSLatitudeRef", "N") == "S":
+    lat_ref = _decode_gps_ref(gps_data.get("GPSLatitudeRef"), "N")
+    lon_ref = _decode_gps_ref(gps_data.get("GPSLongitudeRef"), "E")
+
+    if lat_ref.startswith("S"):
         lat = -lat
-    if gps_data.get("GPSLongitudeRef", "E") == "W":
+    if lon_ref.startswith("W"):
         lon = -lon
+
+    # Validación básica para evitar coordenadas corruptas.
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
 
     return lat, lon
 
@@ -272,50 +320,153 @@ def extract_gps_from_exif(image: Image.Image) -> Optional[tuple[float, float]]:
 # GEOCODIFICACIÓN INVERSA
 # ─────────────────────────────────────────────────────────────
 
-def reverse_geocode(lat: float, lon: float) -> dict:
-    """Convierte coordenadas GPS en dirección/departamento con Nominatim."""
-    url = "https://nominatim.openstreetmap.org/reverse"
-    params = {
-        "lat": lat,
-        "lon": lon,
-        "format": "jsonv2",
-        "addressdetails": 1,
-        "accept-language": "es",
-    }
-    headers = {"User-Agent": "RoadDamageDetectorSemana4/1.0"}
-
-    response = requests.get(url, params=params, headers=headers, timeout=10)
+def _request_json(url: str, params: dict, headers: Optional[dict] = None, timeout: int = 10) -> dict:
+    """Realiza una petición GET y devuelve JSON con errores claros."""
+    response = requests.get(url, params=params, headers=headers, timeout=timeout)
     response.raise_for_status()
-    data = response.json()
+    return response.json()
 
-    address = data.get("address", {})
-    raw_department = (
-        address.get("county")
-        or address.get("municipality")
-        or address.get("city")
-        or address.get("town")
-        or address.get("city_district")
-        or "Desconocido"
+
+def reverse_geocode_with_google(lat: float, lon: float, api_key: str) -> dict:
+    """Convierte coordenadas en dirección usando Google Maps Geocoding API."""
+    data = _request_json(
+        "https://maps.googleapis.com/maps/api/geocode/json",
+        params={
+            "latlng": f"{lat},{lon}",
+            "key": api_key,
+            "language": "es",
+            "region": "ar",
+        },
+        timeout=10,
     )
 
-    department = normalize_department(raw_department)
+    if data.get("status") != "OK" or not data.get("results"):
+        raise RuntimeError(f"Google Geocoding no devolvió resultados: {data.get('status', 'sin estado')}")
+
+    result = data["results"][0]
+    components = result.get("address_components", [])
+
+    province = ""
+    country = ""
+    department_candidates = []
+
+    for component in components:
+        long_name = component.get("long_name", "")
+        types = set(component.get("types", []))
+
+        if "administrative_area_level_2" in types:
+            department_candidates.append(long_name)
+        if "locality" in types:
+            department_candidates.append(long_name)
+        if "administrative_area_level_1" in types:
+            province = long_name
+        if "country" in types:
+            country = long_name
+
+    display_text = result.get("formatted_address", "")
+    department = normalize_department_from_candidates(department_candidates, display_text)
 
     return {
-        "address": data.get("display_name", "Dirección desconocida"),
+        "address": display_text or "Dirección desconocida",
+        "department": department,
+        "province": province,
+        "country": country,
+        "lat": lat,
+        "lon": lon,
+        "geocoder": "Google Maps Geocoding API",
+    }
+
+
+def reverse_geocode_with_nominatim(lat: float, lon: float) -> dict:
+    """Convierte coordenadas en dirección usando OpenStreetMap/Nominatim."""
+    data = _request_json(
+        "https://nominatim.openstreetmap.org/reverse",
+        params={
+            "lat": lat,
+            "lon": lon,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "accept-language": "es",
+        },
+        headers={"User-Agent": "RoadDamageDetectorSemana4/1.0 (educational project)"},
+        timeout=10,
+    )
+
+    address = data.get("address", {})
+    display_text = data.get("display_name", "Dirección desconocida")
+
+    candidates = [
+        address.get("county"),
+        address.get("municipality"),
+        address.get("city"),
+        address.get("town"),
+        address.get("village"),
+        address.get("city_district"),
+        address.get("suburb"),
+    ]
+
+    department = normalize_department_from_candidates(candidates, display_text)
+
+    return {
+        "address": display_text,
         "department": department,
         "province": address.get("state", ""),
         "country": address.get("country", ""),
         "lat": lat,
         "lon": lon,
+        "geocoder": "OpenStreetMap / Nominatim",
     }
 
 
+def reverse_geocode(lat: float, lon: float, google_maps_api_key: str | None = None) -> dict:
+    """
+    Convierte coordenadas GPS en dirección/departamento.
+
+    - Si se configura GOOGLE_MAPS_API_KEY, usa Google Maps.
+    - Si no hay clave o Google falla, usa OpenStreetMap/Nominatim.
+    """
+    if google_maps_api_key:
+        try:
+            return reverse_geocode_with_google(lat, lon, google_maps_api_key)
+        except Exception:
+            # Si Google falla, se intenta Nominatim para no bloquear el flujo de la app.
+            pass
+
+    return reverse_geocode_with_nominatim(lat, lon)
+
+
+def normalize_department_from_candidates(candidates: list[str | None], full_text: str = "") -> str:
+    """Normaliza el departamento revisando campos estructurados y luego la dirección completa."""
+    for candidate in candidates:
+        department = normalize_department(candidate or "")
+        if department in MUNICIPALIDADES:
+            return department
+
+    normalized_text = remove_accents(full_text).lower()
+    for department in MUNICIPALIDADES:
+        if remove_accents(department).lower() in normalized_text:
+            return department
+
+    return "Desconocido"
+
+
+def remove_accents(text: str) -> str:
+    """Quita acentos para comparar nombres de departamentos de manera tolerante."""
+    replacements = str.maketrans(
+        "áéíóúÁÉÍÓÚüÜñÑ",
+        "aeiouAEIOUuUnN",
+    )
+    return text.translate(replacements)
+
+
 def normalize_department(raw: str) -> str:
-    """Normaliza nombres devueltos por Nominatim para que coincidan con el diccionario."""
+    """Normaliza nombres devueltos por geocodificadores para que coincidan con el diccionario."""
     if not raw:
         return "Desconocido"
 
-    normalized = raw.lower().strip()
+    normalized = remove_accents(raw).lower().strip()
+    normalized = normalized.replace("departamento de ", "departamento ")
+
     replacements = {
         "departamento capital": "Capital",
         "capital": "Capital",
@@ -323,26 +474,21 @@ def normalize_department(raw: str) -> str:
         "mendoza": "Capital",
         "departamento godoy cruz": "Godoy Cruz",
         "godoy cruz": "Godoy Cruz",
-        "departamento guaymallén": "Guaymallén",
-        "guaymallén": "Guaymallén",
+        "departamento guaymallen": "Guaymallén",
         "guaymallen": "Guaymallén",
         "departamento las heras": "Las Heras",
         "las heras": "Las Heras",
-        "departamento luján de cuyo": "Luján de Cuyo",
-        "luján de cuyo": "Luján de Cuyo",
+        "departamento lujan de cuyo": "Luján de Cuyo",
         "lujan de cuyo": "Luján de Cuyo",
-        "departamento maipú": "Maipú",
-        "maipú": "Maipú",
+        "departamento maipu": "Maipú",
         "maipu": "Maipú",
         "departamento lavalle": "Lavalle",
         "lavalle": "Lavalle",
-        "departamento san martín": "San Martín",
-        "san martín": "San Martín",
+        "departamento san martin": "San Martín",
         "san martin": "San Martín",
         "departamento rivadavia": "Rivadavia",
         "rivadavia": "Rivadavia",
-        "departamento junín": "Junín",
-        "junín": "Junín",
+        "departamento junin": "Junín",
         "junin": "Junín",
         "departamento la paz": "La Paz",
         "la paz": "La Paz",
@@ -350,8 +496,7 @@ def normalize_department(raw: str) -> str:
         "santa rosa": "Santa Rosa",
         "departamento san carlos": "San Carlos",
         "san carlos": "San Carlos",
-        "departamento tunuyán": "Tunuyán",
-        "tunuyán": "Tunuyán",
+        "departamento tunuyan": "Tunuyán",
         "tunuyan": "Tunuyán",
         "departamento tupungato": "Tupungato",
         "tupungato": "Tupungato",
@@ -359,8 +504,7 @@ def normalize_department(raw: str) -> str:
         "san rafael": "San Rafael",
         "departamento general alvear": "General Alvear",
         "general alvear": "General Alvear",
-        "departamento malargüe": "Malargüe",
-        "malargüe": "Malargüe",
+        "departamento malargue": "Malargüe",
         "malargue": "Malargüe",
     }
     return replacements.get(normalized, raw)
@@ -375,6 +519,7 @@ def make_empty_location() -> dict:
         "country": "Argentina",
         "lat": None,
         "lon": None,
+        "geocoder": "No utilizado",
     }
 
 

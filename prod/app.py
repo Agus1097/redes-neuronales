@@ -73,6 +73,7 @@ def get_secret_value(key: str, default: str = "") -> str:
 model = None
 model_error = None
 model_url = get_secret_value("MODEL_URL", "")
+google_maps_api_key = get_secret_value("GOOGLE_MAPS_API_KEY", "")
 
 try:
     if model_url:
@@ -119,7 +120,11 @@ if uploaded_image is None:
     st.info("Subí una imagen para ejecutar la detección.")
     st.stop()
 
-image = Image.open(uploaded_image)
+# Se conserva una copia de la imagen original para leer EXIF.
+# Convertir a RGB antes de leer EXIF puede eliminar los metadatos GPS en Pillow.
+original_image = Image.open(uploaded_image)
+
+image = original_image.copy()
 if image.mode != "RGB":
     image = image.convert("RGB")
 
@@ -129,15 +134,16 @@ if image.mode != "RGB":
 
 st.divider()
 st.subheader("2. Ubicación")
+st.caption("La app primero intenta leer GPS desde EXIF. Si encuentra coordenadas, las convierte a dirección con geocodificación inversa.")
 
-gps_coords = extract_gps_from_exif(image)
+gps_coords = extract_gps_from_exif(original_image)
 location_info = make_empty_location()
 
 if gps_coords:
     lat, lon = gps_coords
     try:
         with st.spinner("Obteniendo dirección desde coordenadas GPS..."):
-            location_info = reverse_geocode(lat, lon)
+            location_info = reverse_geocode(lat, lon, google_maps_api_key=google_maps_api_key)
         st.success("La imagen contiene coordenadas GPS EXIF.")
     except Exception as exc:
         st.warning(f"La imagen tiene GPS, pero falló la geocodificación inversa: {exc}")
@@ -148,6 +154,7 @@ if gps_coords:
             "country": "Argentina",
             "lat": lat,
             "lon": lon,
+            "geocoder": "Falló la geocodificación inversa",
         }
 else:
     st.warning("La imagen no contiene datos GPS EXIF. Podés elegir el departamento manualmente.")
@@ -168,6 +175,7 @@ col_location_a, col_location_b = st.columns([2, 1])
 with col_location_a:
     st.write(f"**Dirección:** {location_info.get('address', 'No disponible')}")
     st.write(f"**Departamento usado:** {location_info.get('department', 'Desconocido')}")
+    st.write(f"**Geocodificador:** {location_info.get('geocoder', 'No utilizado')}")
 
 with col_location_b:
     lat = location_info.get("lat")
