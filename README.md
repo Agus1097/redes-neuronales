@@ -135,32 +135,6 @@ La app está preparada para tres opciones:
 prod/app.py
 ```
 
-6. Deploy.
-
-## Modelo grande: usar Streamlit Secrets
-
-Si `dev/modelo.pt` supera el límite de GitHub o Streamlit Cloud:
-
-1. Subir el modelo a Google Drive o Hugging Face.
-2. Obtener una URL directa de descarga.
-3. En Streamlit Cloud → App → Settings → Secrets, agregar:
-
-```toml
-MODEL_URL = "https://drive.google.com/uc?export=download&id=TU_FILE_ID"
-```
-
-Para mejorar la dirección obtenida desde GPS, también podés agregar opcionalmente:
-
-```toml
-GOOGLE_MAPS_API_KEY = "TU_API_KEY_DE_GOOGLE_MAPS"
-```
-
-Hay un ejemplo en:
-
-```text
-.streamlit/secrets.example.toml
-```
-
 ## Dataset
 
 Dataset utilizado:
@@ -176,32 +150,19 @@ También está documentado en:
 data/link_dataset.txt
 ```
 
-## Checklist antes de entregar
-
-- [x] Modelo final incluido en `dev/modelo.pt`.
-- [ ] Probar la app localmente con `streamlit run prod/app.py`.
-- [ ] Probar una imagen con daño visible.
-- [ ] Probar una imagen sin GPS.
-- [ ] Probar una imagen con GPS si está disponible.
-- [ ] Verificar que se dibujen las cajas de YOLO.
-- [ ] Verificar que el borrador de correo se genere correctamente.
-- [ ] Verificar los correos de organismos con fuentes oficiales antes de entregar.
-- [ ] Subir el repo a GitHub.
-- [ ] Desplegar en Streamlit Cloud.
-- [ ] Pegar la URL pública de la app en este README.
-
 ## Integrantes
 
 Completar:
 
-- Nombre Apellido — Legajo
-- Nombre Apellido — Legajo
-- Nombre Apellido — Legajo
+- Agustin Leyes — 49491
+- Joaquin Giuliani — 50038
+- Martin Beron — 49952
+- Matias Almendros — 49926
 
 ## App desplegada
 
 Completar luego del deploy:
 
 ```text
-https://TU-APP.streamlit.app
+https://redes-neuronales-xqectxpgagmqvnzcux3aw8.streamlit.app/
 ```
