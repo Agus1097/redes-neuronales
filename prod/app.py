@@ -73,7 +73,6 @@ def get_secret_value(key: str, default: str = "") -> str:
 model = None
 model_error = None
 model_url = get_secret_value("MODEL_URL", "")
-google_maps_api_key = get_secret_value("GOOGLE_MAPS_API_KEY", "")
 
 try:
     if model_url:
@@ -83,13 +82,48 @@ try:
 except Exception as exc:
     model_error = exc
 
-with st.expander("Información del modelo y clases", expanded=False):
+with st.expander("Información del modelo, clases y parámetros", expanded=False):
     st.write("Clases configuradas según el notebook final:")
     st.table(pd.DataFrame([{"id": k, "clase": v} for k, v in CLASS_NAMES.items()]))
-    st.write("Parámetros de inferencia usados por la app:")
-    st.code(
-        f"imgsz={YOLO_IMG_SIZE}\nconf={YOLO_CONF_FOR_PREDICTION}\niou={YOLO_IOU_FOR_NMS}",
-        language="text",
+
+    st.write("Parámetros de inferencia:")
+    yolo_img_size = st.slider(
+        "Tamaño de entrada (imgsz)",
+        min_value=320,
+        max_value=1280,
+        value=YOLO_IMG_SIZE,
+        step=32,
+        help=(
+            "Resolución usada por YOLO durante la predicción. Un valor mayor puede "
+            "detectar detalles más pequeños, pero demora más y consume más recursos."
+        ),
+        key="yolo_img_size",
+    )
+    yolo_confidence = st.slider(
+        "Umbral de confianza (conf)",
+        min_value=0.05,
+        max_value=0.95,
+        value=float(YOLO_CONF_FOR_PREDICTION),
+        step=0.05,
+        format="%.2f",
+        help=(
+            "Confianza mínima para mostrar una detección. Si se baja, aparecen más "
+            "detecciones pero también pueden aumentar los falsos positivos."
+        ),
+        key="yolo_confidence",
+    )
+    yolo_iou = st.slider(
+        "Umbral de solapamiento para NMS (iou)",
+        min_value=0.10,
+        max_value=0.95,
+        value=float(YOLO_IOU_FOR_NMS),
+        step=0.05,
+        format="%.2f",
+        help=(
+            "Controla la eliminación de cajas superpuestas sobre el mismo daño. "
+            "NMS conserva la detección más confiable y descarta cajas redundantes."
+        ),
+        key="yolo_iou",
     )
 
 if model is None:
@@ -120,11 +154,11 @@ if uploaded_image is None:
     st.info("Subí una imagen para ejecutar la detección.")
     st.stop()
 
-# Se conserva una copia de la imagen original para leer EXIF.
-# Convertir a RGB antes de leer EXIF puede eliminar los metadatos GPS en Pillow.
+# Se extrae EXIF antes de convertir la imagen para conservar todos los metadatos.
 original_image = Image.open(uploaded_image)
+gps_coords = extract_gps_from_exif(original_image)
 
-image = original_image.copy()
+image = original_image
 if image.mode != "RGB":
     image = image.convert("RGB")
 
@@ -134,16 +168,14 @@ if image.mode != "RGB":
 
 st.divider()
 st.subheader("2. Ubicación")
-st.caption("La app primero intenta leer GPS desde EXIF. Si encuentra coordenadas, las convierte a dirección con geocodificación inversa.")
 
-gps_coords = extract_gps_from_exif(original_image)
 location_info = make_empty_location()
 
 if gps_coords:
     lat, lon = gps_coords
     try:
         with st.spinner("Obteniendo dirección desde coordenadas GPS..."):
-            location_info = reverse_geocode(lat, lon, google_maps_api_key=google_maps_api_key)
+            location_info = reverse_geocode(lat, lon)
         st.success("La imagen contiene coordenadas GPS EXIF.")
     except Exception as exc:
         st.warning(f"La imagen tiene GPS, pero falló la geocodificación inversa: {exc}")
@@ -154,7 +186,6 @@ if gps_coords:
             "country": "Argentina",
             "lat": lat,
             "lon": lon,
-            "geocoder": "Falló la geocodificación inversa",
         }
 else:
     st.warning("La imagen no contiene datos GPS EXIF. Podés elegir el departamento manualmente.")
@@ -175,7 +206,6 @@ col_location_a, col_location_b = st.columns([2, 1])
 with col_location_a:
     st.write(f"**Dirección:** {location_info.get('address', 'No disponible')}")
     st.write(f"**Departamento usado:** {location_info.get('department', 'Desconocido')}")
-    st.write(f"**Geocodificador:** {location_info.get('geocoder', 'No utilizado')}")
 
 with col_location_b:
     lat = location_info.get("lat")
@@ -198,9 +228,9 @@ with st.spinner("Ejecutando inferencia..."):
     result = run_inference(
         model=model,
         image=image,
-        conf=YOLO_CONF_FOR_PREDICTION,
-        iou=YOLO_IOU_FOR_NMS,
-        imgsz=YOLO_IMG_SIZE,
+        conf=yolo_confidence,
+        iou=yolo_iou,
+        imgsz=yolo_img_size,
     )
     detections_df = result_to_dataframe(result)
     primary_detection = get_primary_detection(detections_df)
